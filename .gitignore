@@ -1,0 +1,21 @@
+# Recordings and recording metadata
+*.adtfdat
+*.adtfdat.*
+20*/
+attachments/
+
+# Extracted attachment archives
+*.tar
+*.tar.gz
+
+# Build output (rebuild with build_calibration_package.ps1; contains ADTF binaries)
+dist/
+*.zip
+*.exe
+*.dll
+
+# Temporary and editor files
+*.tmp
+*.log
+.vs/
+.vscode/
