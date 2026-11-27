@@ -15,7 +15,8 @@ function Read-AttachedArchive($dattool, $recording, $destination) {
         $errorText = $errorTask.Result
         if ($process.ExitCode -ne 0) {
             $message = ($errorText + $text).Trim()
-            if ($message -cmatch "^exception: no extension with name '?attached_files'?( found)?\.?$") { return $false }
+            $diagnostic = $message -creplace '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[ERROR\]: (.*) \[[^\r\n]+\]$', '$1'
+            if ($diagnostic -cmatch "^exception: no extension with name '?attached_files'?( found)?\.?$") { return $false }
             throw "Cannot read existing attachments: $message"
         }
     } finally { $process.Dispose() }

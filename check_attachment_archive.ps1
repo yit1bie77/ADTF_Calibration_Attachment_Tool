@@ -1,3 +1,5 @@
+param([switch]$Extract)
+
 $recording = $env:CHECK_RECORDING
 $archive = $env:CHECK_ARCHIVE
 
@@ -26,6 +28,56 @@ Exit-IfStopped
 if ($LASTEXITCODE -ne 0) {
     Write-Host 'WARNING: Could not list the attachment archive.' -ForegroundColor Yellow
     exit 1
+}
+
+if ($Extract) {
+    $ErrorActionPreference = 'Stop'
+    $issues = 0
+    $saved = 0
+    try {
+        $folder = Get-Item -LiteralPath $env:XML_FOLDER
+        if (-not $folder.PSIsContainer -or $folder.PSProvider.Name -ne 'FileSystem') { throw 'Choose a calibration XML folder.' }
+        foreach ($entry in @($entries | Where-Object { $_ -like '*.xml' } | Select-Object -Unique)) {
+            Exit-IfStopped
+            $name = [IO.Path]::GetFileName($entry)
+            $temp = $null
+            try {
+                if ($entry -match '[*?\[\]"\\]' -or $name.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or
+                    @($entries -ceq $entry).Count -ne 1) { throw 'Unsupported or ambiguous archive path.' }
+                $destination = Join-Path $folder.FullName $name
+                if (Test-Path -LiteralPath $destination) { throw "File already exists: $destination" }
+                $temp = Join-Path $folder.FullName ('.adtf-extract-' + [guid]::NewGuid() + '.tmp')
+                $info = New-Object Diagnostics.ProcessStartInfo -Property @{
+                    FileName = $env:TARTOOL; Arguments = '-xOf "{0}" -- "{1}"' -f $archive, $entry
+                    UseShellExecute = $false; CreateNoWindow = $true
+                    RedirectStandardOutput = $true; RedirectStandardError = $true
+                }
+                $file = [IO.File]::Open($temp, [IO.FileMode]::CreateNew)
+                try {
+                    $process = [Diagnostics.Process]::Start($info)
+                    try {
+                        $errors = $process.StandardError.ReadToEndAsync()
+                        $process.StandardOutput.BaseStream.CopyTo($file)
+                        $process.WaitForExit()
+                        if ($process.ExitCode -ne 0) { throw $errors.Result }
+                        if ($file.Length -eq 0) { throw 'Archive entry is empty or is not a regular file.' }
+                    } finally { $process.Dispose() }
+                } finally { $file.Dispose() }
+                Exit-IfStopped
+                [IO.File]::Move($temp, $destination)
+                $saved++
+                Write-Output "OK: Extracted $destination"
+            } catch {
+                $issues++
+                Write-Output "WARNING: Skipped '$entry': $($_.Exception.Message)"
+            } finally {
+                if ($temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
+            }
+        }
+        if (-not ($saved + $issues)) { Write-Output 'FAILED: No calibration XML file was attached.'; exit 1 }
+        if ($issues) { exit 1 }
+        exit 0
+    } catch { Write-Output "FAILED: $($_.Exception.Message)"; exit 1 }
 }
 
 $entries

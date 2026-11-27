@@ -10,6 +10,7 @@ attachments/
 
 # Build output (rebuild with build_calibration_package.ps1; contains ADTF binaries)
 dist/
+/adtf_file_library/
 *.zip
 *.exe
 *.dll

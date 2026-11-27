@@ -14,7 +14,7 @@ internal static class CalibrationLauncher
             string script = Path.Combine(folder, "calibration_gui.ps1");
             string tool = Path.Combine(folder, "runtime", "adtf_dattool.exe");
             if (!File.Exists(script) || !File.Exists(tool))
-                throw new FileNotFoundException("The application folder is incomplete. Keep the scripts and runtime folder beside ADTF Calibration Attachment Tool.exe.");
+                throw new FileNotFoundException("The application folder is incomplete. Keep the scripts and runtime folder beside adtf_dattool_gui_iss.exe.");
 
             var settings = new ProcessStartInfo
             {
@@ -38,7 +38,7 @@ internal static class CalibrationLauncher
         }
         catch (Exception error)
         {
-            MessageBox.Show(error.Message, "ADTF Calibration Attachment Tool", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(error.Message, "ISS ADTF Data Tool", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
         }
     }

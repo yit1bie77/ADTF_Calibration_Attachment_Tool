@@ -5,7 +5,7 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
 
 $form = New-Object Windows.Forms.Form -Property @{
-    Text = 'ADTF Calibration Attachment Tool'; StartPosition = 'CenterScreen'
+    Text = 'ISS ADTF Data Tool'; StartPosition = 'CenterScreen'
     Size = [Drawing.Size]::new(960, 680); MinimumSize = [Drawing.Size]::new(740, 500)
     Font = [Drawing.Font]::new('Segoe UI', 10)
 }
@@ -15,9 +15,10 @@ $layout = New-Object Windows.Forms.TableLayoutPanel -Property @{
 [void]$layout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new('Absolute', 148))
 [void]$layout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new('Percent', 100))
 [void]$layout.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new('Absolute', 100))
-foreach ($height in @(36, 36, 42)) {
+foreach ($height in @(36, 36)) {
     [void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', $height))
 }
+[void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('AutoSize'))
 [void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Percent', 100))
 [void]$layout.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 30))
 $form.Controls.Add($layout)
@@ -44,14 +45,54 @@ $defaultRecordings = Join-Path $PSScriptRoot '20261029\Data'
 if (-not (Test-Path -LiteralPath $defaultRecordings -PathType Container)) { $defaultRecordings = '' }
 $recordingsFolder = Add-FolderRow 'Recordings folder' $defaultRecordings 0
 $xmlFolder = Add-FolderRow 'Calibration XML folder' 'E:\temp' 1
-$toolbar = New-Object Windows.Forms.FlowLayoutPanel -Property @{ Dock = 'Fill'; WrapContents = $false }
+$toolbar = New-Object Windows.Forms.FlowLayoutPanel -Property @{
+    Dock = 'Fill'; WrapContents = $true; AutoSize = $true; AutoSizeMode = 'GrowAndShrink'
+}
 $layout.Controls.Add($toolbar, 0, 2)
 $layout.SetColumnSpan($toolbar, 3)
 $buttons = @{}
-foreach ($caption in @('Load folder', 'Select all', 'Clear selection', 'Check attachment', 'Attach to selected', 'Replace to selected')) {
-    $button = New-Object Windows.Forms.Button -Property @{ Text = $caption; AutoSize = $true; Height = 30 }
-    $toolbar.Controls.Add($button)
-    $buttons[$caption] = $button
+$actionGroups = [ordered]@{
+    'Recordings' = @('Load folder', 'Select all', 'Clear selection')
+    'Calibration attachments' = @('Check attachment', 'Attach to selected', 'Replace to selected', 'Extract calibration files')
+    'Streams' = @('Check streams', 'Repair recordings')
+}
+foreach ($title in $actionGroups.Keys) {
+    $group = New-Object Windows.Forms.GroupBox -Property @{ Text = $title; AutoSize = $true; AutoSizeMode = 'GrowAndShrink' }
+    $actions = New-Object Windows.Forms.FlowLayoutPanel -Property @{
+        Dock = 'Fill'; WrapContents = $false; AutoSize = $true; AutoSizeMode = 'GrowAndShrink'
+    }
+    foreach ($caption in $actionGroups[$title]) {
+        $button = New-Object Windows.Forms.Button -Property @{ Text = $caption; AutoSize = $true; Height = 30 }
+        $actions.Controls.Add($button)
+        $buttons[$caption] = $button
+    }
+    if ($title -eq 'Streams') {
+        $streamControls = New-Object Windows.Forms.FlowLayoutPanel -Property @{
+            Dock = 'Fill'; FlowDirection = 'TopDown'; WrapContents = $false; AutoSize = $true; AutoSizeMode = 'GrowAndShrink'
+        }
+        $actions.Dock = 'None'
+        $streamControls.Controls.Add($actions)
+        $referenceRow = New-Object Windows.Forms.FlowLayoutPanel -Property @{
+            WrapContents = $false; AutoSize = $true; AutoSizeMode = 'GrowAndShrink'
+        }
+        $referenceLabel = New-Object Windows.Forms.Label -Property @{ Text = 'Reference recording'; Width = 150; Anchor = 'Left'; TextAlign = 'MiddleLeft' }
+        $referencePath = New-Object Windows.Forms.TextBox -Property @{ Width = 235; AccessibleName = 'Reference recording' }
+        $browseReference = New-Object Windows.Forms.Button -Property @{ Text = 'Browse...'; AutoSize = $true; AccessibleName = 'Browse for reference recording' }
+        $referenceRow.Controls.AddRange(@($referenceLabel, $referencePath, $browseReference))
+        $streamControls.Controls.Add($referenceRow)
+        $repairOutputRow = New-Object Windows.Forms.FlowLayoutPanel -Property @{
+            WrapContents = $false; AutoSize = $true; AutoSizeMode = 'GrowAndShrink'
+        }
+        $repairOutputLabel = New-Object Windows.Forms.Label -Property @{ Text = 'Repair output folder'; Width = 150; Anchor = 'Left'; TextAlign = 'MiddleLeft' }
+        $repairOutputPath = New-Object Windows.Forms.TextBox -Property @{ Width = 235; AccessibleName = 'Repair output folder' }
+        $browseRepairOutput = New-Object Windows.Forms.Button -Property @{ Text = 'Browse...'; AutoSize = $true; AccessibleName = 'Browse for repair output folder' }
+        $repairOutputRow.Controls.AddRange(@($repairOutputLabel, $repairOutputPath, $browseRepairOutput))
+        $streamControls.Controls.Add($repairOutputRow)
+        $group.Controls.Add($streamControls)
+    } else {
+        $group.Controls.Add($actions)
+    }
+    $toolbar.Controls.Add($group)
 }
 
 $split = New-Object Windows.Forms.SplitContainer -Property @{ Dock = 'Fill'; SplitterWidth = 8 }
@@ -83,7 +124,7 @@ if (-not (Test-Path -LiteralPath $dattool -PathType Leaf)) {
 function Write-Result($line) {
     $output.SelectionStart = $output.TextLength
     $output.SelectionColor = switch -Regex ($line) {
-        '^OK$|^Verified recording:' { [Drawing.Color]::DarkGreen; break }
+        '^OK(?:$|:)|^Verified recording:' { [Drawing.Color]::DarkGreen; break }
         '^WARNING:' { [Drawing.Color]::DarkGoldenrod; break }
         '^FAILED:|^Error:' { [Drawing.Color]::Firebrick; break }
         default { [Drawing.Color]::FromArgb(35, 42, 49) }
@@ -126,12 +167,20 @@ function Start-NextRecording {
             }
             $info.EnvironmentVariables['DATTOOL'] = $dattool
             $info.EnvironmentVariables['ADTF_STOP_FILE'] = $state.StopFile
-            if ($state.Mode -eq 'Check') {
+            if ($state.Mode -in @('Check', 'Extract')) {
                 $scriptFile = Join-Path $PSScriptRoot 'check_attachment_archive.ps1'
                 $archive = Join-Path ([IO.Path]::GetTempPath()) ('adtf-gui-' + [guid]::NewGuid() + '.tar.gz')
                 $info.EnvironmentVariables['CHECK_RECORDING'] = $item.FullName
                 $info.EnvironmentVariables['CHECK_ARCHIVE'] = $archive
                 $info.EnvironmentVariables['TARTOOL'] = Join-Path $env:SystemRoot 'System32\tar.exe'
+                if ($state.Mode -eq 'Extract') { $info.EnvironmentVariables['XML_FOLDER'] = $state.XmlPath }
+            } elseif ($state.Mode -in @('Streams', 'Repair')) {
+                $scriptFile = Join-Path $PSScriptRoot 'check_adtf_streams.ps1'
+                $info.EnvironmentVariables['CHECK_RECORDING'] = $item.FullName
+                if ($state.Mode -eq 'Repair') {
+                    $info.EnvironmentVariables['ADTF_REPAIR_REFERENCE'] = $state.ReferencePath
+                    $info.EnvironmentVariables['ADTF_REPAIR_OUTPUT_FOLDER'] = $state.RepairOutputPath
+                }
             } else {
                 $scriptFile = Join-Path $PSScriptRoot 'attach_calibration.ps1'
                 $info.EnvironmentVariables['ADTF_FILE'] = $item.FullName
@@ -141,7 +190,9 @@ function Start-NextRecording {
                 }
             }
             $info.Arguments = '-NoProfile -NonInteractive -File "{0}"' -f $scriptFile
+            if ($state.Mode -eq 'Extract') { $info.Arguments += ' -Extract' }
             if ($state.Mode -eq 'Replace') { $info.Arguments += ' -Replace' }
+            if ($state.Mode -eq 'Repair') { $info.Arguments += ' -Repair' }
             $state.Process = [Diagnostics.Process]::Start($info)
             $state.Tasks = @($state.Process.StandardOutput.ReadToEndAsync(), $state.Process.StandardError.ReadToEndAsync())
             $state.Archive = $archive
@@ -154,7 +205,7 @@ function Start-NextRecording {
     }
     $timer.Stop()
     Set-OperationRunning $false
-    if ($state.Mode -ne 'Check') { Load-Recordings }
+    if ($state.Mode -in @('Attach', 'Replace', 'Repair')) { Load-Recordings }
     if ($state.StopRequested) {
         Remove-Item -LiteralPath $state.StopFile -Force -ErrorAction SilentlyContinue
         $message = if ($state.Finished -lt $state.Total) {
@@ -172,11 +223,26 @@ function Start-NextRecording {
 function Start-Operation($mode) {
     $items = @($recordings.CheckedItems)
     if (-not $items.Count) { $status.Text = 'No ADTFDAT file is selected.'; return }
-    if ($mode -ne 'Check') {
+    if ($mode -eq 'Repair') {
+        if (-not $referencePath.Text.Trim()) { $status.Text = 'Choose a reference recording in the Streams group.'; return }
+        try {
+            $reference = Get-Item -LiteralPath $referencePath.Text.Trim()
+            if ($reference.PSIsContainer -or $reference.Extension -ne '.adtfdat') { throw 'Choose an ADTFDAT reference recording.' }
+            if ($items.FullName -contains $reference.FullName) { throw 'The reference recording cannot also be selected for repair.' }
+            $state.ReferencePath = $reference.FullName
+            $state.RepairOutputPath = ''
+            if ($repairOutputPath.Text.Trim()) {
+                $destination = Get-Item -LiteralPath $repairOutputPath.Text.Trim()
+                if (-not $destination.PSIsContainer -or $destination.PSProvider.Name -ne 'FileSystem') { throw 'Choose a repair output folder.' }
+                $state.RepairOutputPath = $destination.FullName
+            }
+        } catch { $status.Text = $_.Exception.Message; return }
+    }
+    if ($mode -in @('Attach', 'Replace', 'Extract')) {
         try {
             $folder = Get-Item -LiteralPath $xmlFolder.Text.Trim()
             if (-not $folder.PSIsContainer) { throw 'Select a calibration XML folder.' }
-            if (-not (Get-ChildItem -LiteralPath $folder.FullName -Filter '*.xml' -File | Where-Object Extension -eq '.xml' | Select-Object -First 1)) {
+            if ($mode -ne 'Extract' -and -not (Get-ChildItem -LiteralPath $folder.FullName -Filter '*.xml' -File | Where-Object Extension -eq '.xml' | Select-Object -First 1)) {
                 throw 'No XML files were found in the calibration folder.'
             }
             $state.XmlPath = $folder.FullName
@@ -208,7 +274,7 @@ $timer.Add_Tick({
     if (-not $cancelled) { $state.Finished++ }
     if (-not $cancelled -and $state.Process.ExitCode -ne 0) {
         $state.Issues++
-        if ($state.Mode -ne 'Check') { Write-Result 'FAILED: Attachment was not completed.' }
+        if ($state.Mode -in @('Attach', 'Replace')) { Write-Result 'FAILED: Attachment was not completed.' }
     }
     $state.Process.Dispose()
     $state.Process = $null
@@ -221,6 +287,27 @@ $buttons['Load folder'].Add_Click({ Load-Recordings })
 $buttons['Select all'].Add_Click({ for ($index = 0; $index -lt $recordings.Items.Count; $index++) { $recordings.SetItemChecked($index, $true) } })
 $buttons['Clear selection'].Add_Click({ for ($index = 0; $index -lt $recordings.Items.Count; $index++) { $recordings.SetItemChecked($index, $false) } })
 $buttons['Check attachment'].Add_Click({ Start-Operation 'Check' })
+$buttons['Extract calibration files'].Add_Click({ Start-Operation 'Extract' })
+$buttons['Check streams'].Add_Click({ Start-Operation 'Streams' })
+$browseReference.Add_Click({
+    $dialog = New-Object Windows.Forms.OpenFileDialog -Property @{
+        Title = 'Choose a reference recording'; Filter = 'ADTF recordings (*.adtfdat)|*.adtfdat'; CheckFileExists = $true
+    }
+    try {
+        if (Test-Path -LiteralPath $recordingsFolder.Text -PathType Container) {
+            $dialog.InitialDirectory = $recordingsFolder.Text
+        }
+        if ($dialog.ShowDialog($form) -eq 'OK') { $referencePath.Text = $dialog.FileName }
+    } finally { $dialog.Dispose() }
+})
+$buttons['Repair recordings'].Add_Click({ Start-Operation 'Repair' })
+$browseRepairOutput.Add_Click({
+    $dialog = New-Object Windows.Forms.FolderBrowserDialog -Property @{ ShowNewFolderButton = $true }
+    try {
+        $dialog.SelectedPath = $repairOutputPath.Text
+        if ($dialog.ShowDialog($form) -eq 'OK') { $repairOutputPath.Text = $dialog.SelectedPath }
+    } finally { $dialog.Dispose() }
+})
 $buttons['Attach to selected'].Add_Click({ Start-Operation 'Attach' })
 $buttons['Replace to selected'].Add_Click({ Start-Operation 'Replace' })
 $stopButton.Add_Click({

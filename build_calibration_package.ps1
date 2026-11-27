@@ -1,6 +1,6 @@
 param(
-    [string]$AdtfRoot = 'C:\Tools\ADTF\Releases\3.19.0',
-    [string]$OutputFolder = (Join-Path $PSScriptRoot 'dist\ADTF Calibration Attachment Tool')
+    [string]$AdtfRoot = (Join-Path $PSScriptRoot 'adtf_file_library'),
+    [string]$OutputFolder = (Join-Path $PSScriptRoot 'dist\adtf_dattool_gui_iss')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,11 +14,11 @@ foreach ($required in @($compiler, $dattool)) {
 $package = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputFolder)
 $runtime = Join-Path $package 'runtime'
 New-Item -ItemType Directory -Path $runtime -Force | Out-Null
-$launcher = Join-Path $package 'ADTF Calibration Attachment Tool.exe'
+$launcher = Join-Path $package 'adtf_dattool_gui_iss.exe'
 & $compiler /nologo /target:winexe /platform:x64 /reference:System.Windows.Forms.dll "/out:$launcher" (Join-Path $PSScriptRoot 'CalibrationLauncher.cs')
 if ($LASTEXITCODE -ne 0) { throw "Launcher compilation failed (exit $LASTEXITCODE)." }
 
-foreach ($name in @('calibration_gui.ps1', 'check_attachment_archive.ps1', 'attach_calibration.ps1', 'adtf_attachments.ps1', 'PACKAGE.md')) {
+foreach ($name in @('calibration_gui.ps1', 'check_attachment_archive.ps1', 'check_adtf_streams.ps1', 'attach_calibration.ps1', 'adtf_attachments.ps1', 'PACKAGE.md')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $package -Force
 }
 Copy-Item -LiteralPath $dattool -Destination $runtime -Force
