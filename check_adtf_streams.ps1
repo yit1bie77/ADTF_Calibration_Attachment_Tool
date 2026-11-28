@@ -1,4 +1,4 @@
-param([switch]$Repair)
+param([switch]$Repair, [switch]$CheckReadability)
 
 $ErrorActionPreference = 'Stop'
 
@@ -6,11 +6,11 @@ function Test-StopRequested {
     $env:ADTF_STOP_FILE -and [IO.File]::Exists($env:ADTF_STOP_FILE)
 }
 
-function Invoke-Dattool([string[]]$arguments, [switch]$AllowRepairLog) {
+function Invoke-AdtfTool([string[]]$arguments, [string]$Executable = $env:DATTOOL, [switch]$AllowRepairLog, [switch]$AllowNoSamples) {
     if (Test-StopRequested) { throw [OperationCanceledException]::new() }
     $quoted = @($arguments | ForEach-Object { '"' + ($_ -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"' })
     $info = New-Object Diagnostics.ProcessStartInfo -Property @{
-        FileName = $env:DATTOOL; Arguments = ($quoted -join ' ')
+        FileName = $Executable; Arguments = ($quoted -join ' ')
         UseShellExecute = $false; CreateNoWindow = $true
         RedirectStandardOutput = $true; RedirectStandardError = $true
     }
@@ -30,19 +30,53 @@ function Invoke-Dattool([string[]]$arguments, [switch]$AllowRepairLog) {
         if ($AllowRepairLog) {
             $unexpectedStderr = ($unexpectedStderr -replace '(?m)^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[(?:INFO|WARNING)\]:[^\r\n]*', '').Trim()
         }
-        if ($process.ExitCode -ne 0 -or $unexpectedStderr -or $stdout.Result -match '(?im)^\s*(?:(?:exception|error):|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[(?:ERROR|FATAL)\]:)') {
+        $unexpectedExit = $process.ExitCode -ne 0 -and -not ($AllowNoSamples -and $process.ExitCode -eq 3)
+        if ($unexpectedExit -or $unexpectedStderr -or $stdout.Result -match '(?im)^\s*(?:(?:exception|error):|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[(?:ERROR|FATAL)\]:)') {
             throw "ADTF returned exit code $($process.ExitCode). $details"
         }
         if ($AllowRepairLog) { $details } else { $stdout.Result }
     } finally { $process.Dispose() }
 }
 
-function Get-Streams($path) {
-    $inventory = (Invoke-Dattool @('--liststreams', $path, '--json')) | ConvertFrom-Json
+function Get-RecordingExtensions($path, $header) {
+    $count = [uint32]$header.extension_count
+    $offset = [uint64]$header.extension_offset
+    $byteOrder = $header.header_byte_order
+    $reader = [IO.BinaryReader]::new([IO.File]::OpenRead($path))
+    try {
+        $length = [uint64]$reader.BaseStream.Length
+        if ($count -eq 0) { return }
+        if ($byteOrder -notin @('1', '2')) { throw "Unsupported ADTF byte order: $byteOrder" }
+        if ($offset -gt $length -or (512L * $count) -gt ($length - $offset)) {
+            throw 'The extension directory lies outside the recording.'
+        }
+        $reader.BaseStream.Position = [long]$offset
+        for ($entryNumber = 0; $entryNumber -lt $count; $entryNumber++) {
+            if (Test-StopRequested) { throw [OperationCanceledException]::new() }
+            $entry = $reader.ReadBytes(512)
+            if ($entry.Length -ne 512) { throw 'The extension directory is truncated.' }
+            $name = ([Text.Encoding]::UTF8.GetString($entry, 0, 384) -split "`0", 2)[0]
+            if ($byteOrder -eq '2') {
+                [Array]::Reverse($entry, 384, 2)
+                [Array]::Reverse($entry, 400, 8)
+                [Array]::Reverse($entry, 408, 8)
+            }
+            $position = [BitConverter]::ToUInt64($entry, 400)
+            $size = [BitConverter]::ToUInt64($entry, 408)
+            [pscustomobject]@{
+                Name = $name; StreamId = [BitConverter]::ToUInt16($entry, 384)
+                Offset = $position; Size = $size
+                InBounds = $position -le $length -and $size -le ($length - $position)
+            }
+        }
+    } finally { $reader.Dispose() }
+}
+
+function Get-RecordingStreams([string]$path) {
+    $inventory = (Invoke-AdtfTool @('--liststreams', $path, '--json')) | ConvertFrom-Json
     $inventory | ForEach-Object { $_.streams } | Where-Object { $null -ne $_ }
 }
 
-$scratch = $null
 try {
     if ($Repair) {
         $inputFile = Get-Item -LiteralPath $env:CHECK_RECORDING
@@ -55,109 +89,83 @@ try {
             if (-not $folder.PSIsContainer -or $folder.PSProvider.Name -ne 'FileSystem') { throw 'Choose a repair output folder.' }
             $outputFolder = $folder.FullName
         }
-        $outputName = if ($outputFolder -eq $inputFile.DirectoryName) { $inputFile.BaseName + '.repaired.adtfdat' } else { $inputFile.Name }
+        $outputName = $inputFile.BaseName + '_rep.adtfdat'
         $destination = Join-Path $outputFolder $outputName
         if (Test-Path -LiteralPath $destination) { throw "Repair output already exists: $destination" }
-        $scratch = Join-Path $outputFolder ('.adtf-repair-' + [guid]::NewGuid())
-        New-Item -ItemType Directory -Path $scratch | Out-Null
-        $pending = Join-Path $scratch 'repair.adtfdat'
         Write-Output "Reference: $($reference.FullName)"
-        $partialRepair = $false
+        Write-Output "Repair output: $destination"
         try {
-            $details = Invoke-Dattool @('--repair', $inputFile.FullName, '--output', $pending, '--reference', $reference.FullName) -AllowRepairLog
+            $details = Invoke-AdtfTool @('--repair', $inputFile.FullName, '--output', $destination, '--reference', $reference.FullName) -AllowRepairLog
         } catch {
-            $details = $_.Exception.Message
-            if ($details -notmatch 'ios_base::failbit set: iostream stream error' -or
-                -not (Test-Path -LiteralPath $pending -PathType Leaf) -or
-                (Get-Item -LiteralPath $pending).Length -eq 0) { throw }
-            $partialRepair = $true
+            if (Test-Path -LiteralPath $destination -PathType Leaf) {
+                Write-Output "WARNING: Repair left output that may be incomplete: $destination"
+            }
+            throw
         }
         if ($details.Trim()) { Write-Output $details.Trim() }
-        $partialRepair = $partialRepair -or $details -match 'Stopped processing at file offset'
-        $unverified = $false
-        try {
-            $null = Get-Streams $pending
-        } catch [OperationCanceledException] {
-            throw
-        } catch {
-            if (-not $partialRepair -or -not (Test-Path -LiteralPath $pending -PathType Leaf) -or
-                (Get-Item -LiteralPath $pending).Length -eq 0) { throw }
-            $unverified = $true
-            Write-Output "WARNING: The repair output could not be reopened: $($_.Exception.Message)"
-        }
-        if (Test-StopRequested) { throw [OperationCanceledException]::new() }
-        [IO.File]::Move($pending, $destination)
-        if ($unverified) {
-            Write-Output "WARNING: Saved unverified repair output: $destination"
-            exit 1
-        }
-        if ($partialRepair) {
-            Write-Output "WARNING: Saved readable repair output; recovery may be incomplete: $destination"
+        if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) { throw "ADTF did not create repair output: $destination" }
+        if ($details -match 'Stopped processing at file offset') {
+            Write-Output "WARNING: Recovery may be incomplete: $destination"
             exit 0
         }
         Write-Output "OK: Repaired recording: $destination"
         exit 0
     }
-    $streams = @(Get-Streams $env:CHECK_RECORDING)
-    if (-not $streams.Count) {
-        Write-Output 'WARNING: No streams were listed.'
+    $path = $env:CHECK_RECORDING
+    if ($CheckReadability) {
+        $scanner = Join-Path $PSScriptRoot 'runtime\adtf_sample_scan.exe'
+        if (-not (Test-Path -LiteralPath $scanner -PathType Leaf)) {
+            $scanner = Join-Path $PSScriptRoot 'dist\adtf_dattool_gui_iss\runtime\adtf_sample_scan.exe'
+        }
+        if (-not (Test-Path -LiteralPath $scanner -PathType Leaf)) { throw 'Sample scanner not found. Rebuild the GUI package.' }
+        $result = (Invoke-AdtfTool @($path) -Executable $scanner -AllowNoSamples).Trim()
+        Write-Output $result
+        if ($result -like 'WARNING:*') { exit 1 }
+        exit 0
+    }
+    $dump = Invoke-AdtfTool @('--dump', $path, '--header')
+    $header = @{}
+    foreach ($line in ($dump -split '\r?\n')) {
+        if ($line -match '^(extension_count|extension_offset|header_byte_order|chunk_count|data_size|file_duration|file_time|version_id):\s*(\S+)$') {
+            $header[$Matches[1]] = $Matches[2]
+        }
+    }
+    if ($header.Count -ne 8) { throw 'ADTF did not report the expected header metadata.' }
+    Write-Output ('Header: {0} duration | {1:N0} chunks | {2:N2} GiB of data' -f $header.file_duration, [uint64]$header.chunk_count, ([uint64]$header.data_size / 1GB))
+    Write-Output "  Created: $($header.file_time) | Format version: $($header.version_id)"
+    $extensions = @(Get-RecordingExtensions $path $header)
+    $indexes = @($extensions | Where-Object Name -Match '^index(?:_add)?\d+$')
+    $masterIndex = $indexes | Where-Object Name -EQ 'index0' | Select-Object -First 1
+    $indexDetail = if ($masterIndex) { ' | index0: {0:N0} bytes' -f $masterIndex.Size } else { '' }
+    Write-Output "Index: $($indexes.Count) entries$indexDetail"
+    $otherExtensions = @($extensions | Where-Object Name -NotMatch '^index(?:_add)?\d+$')
+    Write-Output "Extensions: $($otherExtensions.Count) non-index entries"
+    foreach ($entry in $otherExtensions) {
+        Write-Output ('  {0}: {1:N0} bytes' -f $entry.Name, $entry.Size)
+    }
+    $invalid = @($extensions | Where-Object { -not $_.InBounds })
+    foreach ($entry in $invalid) { Write-Output "FAILED: $($entry.Name) points outside the recording." }
+
+    $streams = @(Get-RecordingStreams $path)
+    $emptyStreams = @($streams | Where-Object item_count -EQ 0)
+    Write-Output "Streams: $($streams.Count) ($($emptyStreams.Count) empty)"
+    foreach ($stream in $streams) {
+        Write-Output ('  {0}: {1:N0} items' -f $stream.stream, [uint64]$stream.item_count)
+    }
+    if ($invalid.Count) { exit 1 }
+    if (-not $masterIndex -or -not $streams.Count -or $emptyStreams.Count -eq $streams.Count) {
+        if (-not $masterIndex) { Write-Output 'WARNING: Master index (index0) not found.' }
+        if (-not $streams.Count) { Write-Output 'WARNING: No streams were listed.' }
+        elseif ($emptyStreams.Count -eq $streams.Count) { Write-Output 'WARNING: All listed streams are empty.' }
         exit 1
     }
-
-    $scratch = Join-Path ([IO.Path]::GetTempPath()) ('adtf-stream-check-' + [guid]::NewGuid())
-    New-Item -ItemType Directory -Path $scratch | Out-Null
-    $copy = Join-Path $scratch 'stream.adtfdat'
-    try {
-        $copyArguments = @('--create', $copy, '--input', $env:CHECK_RECORDING) + @(
-            foreach ($stream in $streams) { '--stream'; $stream.stream }
-        )
-        $null = Invoke-Dattool $copyArguments
-        $readback = @(Get-Streams $copy)
-        foreach ($stream in $streams) {
-            $matching = @($readback | Where-Object { $_.stream -ceq $stream.stream })
-            if ($matching.Count -ne 1 -or $matching[0].item_count -ne $stream.item_count) {
-                throw "Item count mismatch for '$($stream.stream)': expected $($stream.item_count), got $($matching.item_count -join ',')."
-            }
-        }
-        foreach ($stream in $streams) {
-            Write-Output "OK: $($stream.stream) ($($stream.item_count) items)"
-        }
-        Write-Output "Streams checked: $($streams.Count); with issues: 0."
-        exit 0
-    } catch [OperationCanceledException] {
-        throw
-    } catch {
-        Write-Output "WARNING: The combined stream check could not be verified. Retrying streams individually. $($_.Exception.Message)"
-    } finally {
-        if (Test-Path -LiteralPath $copy) { Remove-Item -LiteralPath $copy -Force }
-    }
-
-    $issues = 0
-    foreach ($stream in $streams) {
-        try {
-            $null = Invoke-Dattool @('--create', $copy, '--input', $env:CHECK_RECORDING, '--stream', $stream.stream)
-            $readback = @(Get-Streams $copy | Where-Object { $_.stream -ceq $stream.stream })
-            if ($readback.Count -ne 1 -or $readback[0].item_count -ne $stream.item_count) {
-                throw "Expected $($stream.item_count) items, but ADTF reported $($readback.item_count -join ',') after copying."
-            }
-            Write-Output "OK: $($stream.stream) ($($stream.item_count) items)"
-        } catch [OperationCanceledException] {
-            throw
-        } catch {
-            $issues++
-            Write-Output "FAILED: $($stream.stream): $($_.Exception.Message)"
-        } finally {
-            if (Test-Path -LiteralPath $copy) { Remove-Item -LiteralPath $copy -Force }
-        }
-    }
-    Write-Output "Streams checked: $($streams.Count); with issues: $issues."
-    if ($issues) { exit 1 }
+    Write-Output 'OK: Metadata checks passed.'
 } catch [OperationCanceledException] {
-    if ($Repair) { Write-Output 'Repair stopped.' } else { Write-Output 'Stream check stopped.' }
+    if ($Repair) { Write-Output 'Repair stopped.' }
+    elseif ($CheckReadability) { Write-Output 'Sample readability check stopped.' }
+    else { Write-Output 'Recording analysis stopped.' }
     exit 2
 } catch {
     Write-Output "FAILED: $($_.Exception.Message)"
     exit 1
-} finally {
-    if ($scratch) { Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue }
 }

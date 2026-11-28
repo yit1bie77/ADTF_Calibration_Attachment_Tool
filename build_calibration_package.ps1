@@ -1,15 +1,25 @@
 param(
     [string]$AdtfRoot = (Join-Path $PSScriptRoot 'adtf_file_library'),
-    [string]$OutputFolder = (Join-Path $PSScriptRoot 'dist\adtf_dattool_gui_iss')
+    [string]$OutputFolder = (Join-Path $PSScriptRoot 'dist\adtf_dattool_gui_iss'),
+    [string]$DevEssentialRoot = 'C:\Tools\ADTF\Releases\3.19.0\pkg\dev_essential'
 )
 
 $ErrorActionPreference = 'Stop'
 $compiler = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $bin = Join-Path $AdtfRoot 'bin'
 $dattool = Join-Path $bin 'adtf_dattool.exe'
-foreach ($required in @($compiler, $dattool)) {
+$sdkConfig = Join-Path $DevEssentialRoot 'lib\cmake\dev_essential\dev_essential-config.cmake'
+foreach ($required in @($compiler, $dattool, $sdkConfig)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required file not found: $required" }
 }
+
+$scanBuild = Join-Path $PSScriptRoot 'dist\sample_scan_build'
+$adtfConfigDir = (Resolve-Path -LiteralPath (Join-Path $AdtfRoot 'lib\cmake\adtf_file')).Path
+$sdkConfigDir = (Get-Item -LiteralPath $sdkConfig).DirectoryName
+& cmake -S (Join-Path $PSScriptRoot 'sample_scan') -B $scanBuild -G 'Visual Studio 17 2022' -A x64 "-Dadtf_file_DIR=$adtfConfigDir" "-Ddev_essential_DIR=$sdkConfigDir"
+if ($LASTEXITCODE -ne 0) { throw "Sample scanner configuration failed (exit $LASTEXITCODE)." }
+& cmake --build $scanBuild --config RelWithDebInfo
+if ($LASTEXITCODE -ne 0) { throw "Sample scanner build failed (exit $LASTEXITCODE)." }
 
 $package = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputFolder)
 $runtime = Join-Path $package 'runtime'
@@ -22,6 +32,7 @@ foreach ($name in @('calibration_gui.ps1', 'check_attachment_archive.ps1', 'chec
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $package -Force
 }
 Copy-Item -LiteralPath $dattool -Destination $runtime -Force
+Copy-Item -LiteralPath (Join-Path $scanBuild 'RelWithDebInfo\adtf_sample_scan.exe') -Destination $runtime -Force
 Get-ChildItem -LiteralPath $bin -Filter '*.dll' -File | Where-Object Name -Match '^(?:concrt|msvcp|vcruntime)140.*\.dll$' |
     Copy-Item -Destination $runtime -Force
 $license = Join-Path $AdtfRoot 'LICENSE'

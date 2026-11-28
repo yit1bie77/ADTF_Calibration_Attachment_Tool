@@ -54,7 +54,7 @@ $buttons = @{}
 $actionGroups = [ordered]@{
     'Recordings' = @('Load folder', 'Select all', 'Clear selection')
     'Calibration attachments' = @('Check attachment', 'Attach to selected', 'Replace to selected', 'Extract calibration files')
-    'Streams' = @('Check streams', 'Repair recordings')
+    'Streams' = @('Analyze recording', 'Check sample readability', 'Repair recordings')
 }
 foreach ($title in $actionGroups.Keys) {
     $group = New-Object Windows.Forms.GroupBox -Property @{ Text = $title; AutoSize = $true; AutoSizeMode = 'GrowAndShrink' }
@@ -174,7 +174,7 @@ function Start-NextRecording {
                 $info.EnvironmentVariables['CHECK_ARCHIVE'] = $archive
                 $info.EnvironmentVariables['TARTOOL'] = Join-Path $env:SystemRoot 'System32\tar.exe'
                 if ($state.Mode -eq 'Extract') { $info.EnvironmentVariables['XML_FOLDER'] = $state.XmlPath }
-            } elseif ($state.Mode -in @('Streams', 'Repair')) {
+            } elseif ($state.Mode -in @('Analyze recording', 'Check sample readability', 'Repair')) {
                 $scriptFile = Join-Path $PSScriptRoot 'check_adtf_streams.ps1'
                 $info.EnvironmentVariables['CHECK_RECORDING'] = $item.FullName
                 if ($state.Mode -eq 'Repair') {
@@ -192,6 +192,7 @@ function Start-NextRecording {
             $info.Arguments = '-NoProfile -NonInteractive -File "{0}"' -f $scriptFile
             if ($state.Mode -eq 'Extract') { $info.Arguments += ' -Extract' }
             if ($state.Mode -eq 'Replace') { $info.Arguments += ' -Replace' }
+            if ($state.Mode -eq 'Check sample readability') { $info.Arguments += ' -CheckReadability' }
             if ($state.Mode -eq 'Repair') { $info.Arguments += ' -Repair' }
             $state.Process = [Diagnostics.Process]::Start($info)
             $state.Tasks = @($state.Process.StandardOutput.ReadToEndAsync(), $state.Process.StandardError.ReadToEndAsync())
@@ -288,7 +289,8 @@ $buttons['Select all'].Add_Click({ for ($index = 0; $index -lt $recordings.Items
 $buttons['Clear selection'].Add_Click({ for ($index = 0; $index -lt $recordings.Items.Count; $index++) { $recordings.SetItemChecked($index, $false) } })
 $buttons['Check attachment'].Add_Click({ Start-Operation 'Check' })
 $buttons['Extract calibration files'].Add_Click({ Start-Operation 'Extract' })
-$buttons['Check streams'].Add_Click({ Start-Operation 'Streams' })
+$buttons['Analyze recording'].Add_Click({ Start-Operation 'Analyze recording' })
+$buttons['Check sample readability'].Add_Click({ Start-Operation 'Check sample readability' })
 $browseReference.Add_Click({
     $dialog = New-Object Windows.Forms.OpenFileDialog -Property @{
         Title = 'Choose a reference recording'; Filter = 'ADTF recordings (*.adtfdat)|*.adtfdat'; CheckFileExists = $true
